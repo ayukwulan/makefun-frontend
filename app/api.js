@@ -1,30 +1,25 @@
-const ROOT = 'https://make.fun/api';
-const TTL = 60_000;
-const cache = new Map();
-const inflight = new Map();
-
-export async function get(path) {
-  const now = Date.now();
-  const old = cache.get(path);
-  if (old && now - old.at < TTL) return old.body;
-  if (inflight.has(path)) return inflight.get(path);
-  const request = (async () => {
-    const headers = old?.etag ? { 'If-None-Match': old.etag } : {};
-    const response = await fetch(ROOT + path, { headers });
-    if (response.status === 304 && old) {
-      old.at = Date.now();
-      return old.body;
+const responses = new Map(), requests = new Map();
+const endpoint = "https://make.fun/api";
+export async function get(resource) {
+  const saved = responses.get(resource);
+  if (saved && Date.now() - saved.checked < 60000) return saved.payload;
+  if (requests.has(resource)) return requests.get(resource);
+  const task = (async () => {
+    const reply = await fetch(endpoint + resource, { headers: saved?.tag ? { "If-None-Match": saved.tag } : {} });
+    if (reply.status === 304 && saved) {
+      saved.checked = Date.now();
+      return saved.payload;
     }
-    if (!response.ok) throw new Error(`make.fun returned ${response.status}`);
-    const body = await response.json();
-    cache.set(path, { body, etag: response.headers.get('ETag'), at: Date.now() });
-    return body;
-  })().finally(() => inflight.delete(path));
-  inflight.set(path, request);
-  return request;
+    if (!reply.ok) throw Error(`make.fun returned ${reply.status}`);
+    const payload = await reply.json();
+    responses.set(resource, { payload, tag: reply.headers.get("ETag"), checked: Date.now() });
+    return payload;
+  })().finally(() => requests.delete(resource));
+  requests.set(resource, task);
+  return task;
 }
-
-export const getBounties = () => get('/competitions?status=open&activity=times');
-export const getBounty = (slug) => get(`/competitions/${encodeURIComponent(slug)}`);
-export const getLeaderboard = (slug, view) => get(`/competitions/${encodeURIComponent(slug)}/leaderboard${view ? `?view=${encodeURIComponent(view)}` : ''}`);
-export const getProfile = (handle) => get(`/profiles/${encodeURIComponent(handle)}`);
+const competitionPath = slug => `/competitions/${encodeURIComponent(slug)}`;
+export const getProfile = handle => get(`/profiles/${encodeURIComponent(handle)}`);
+export const getBounty = slug => get(competitionPath(slug));
+export const getBounties = () => get("/competitions?status=open&activity=times");
+export const getLeaderboard = (slug, view) => get(competitionPath(slug) + "/leaderboard" + (view ? `?view=${encodeURIComponent(view)}` : ""));

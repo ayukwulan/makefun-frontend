@@ -1,80 +1,65 @@
-import { getBounties, getBounty, getLeaderboard, getProfile } from './api.js';
-import { ended, left } from './format.js';
-import { board, bounty, errorView, leaderboard, profile } from './views.js';
-
-const app = document.querySelector('#app');
-let boardData;
-let boardFilters = { q: '', category: 'all', state: 'all', sort: 'deadline' };
+import { getProfile, getLeaderboard, getBounty, getBounties } from "./api.js";
+import { left, ended } from "./format.js";
+import { profile, leaderboard, bounty, board, errorView } from "./views.js";
+const surface = document.querySelector("#app");
+let listings;
+let selection = { q: "", category: "all", state: "all", sort: "deadline" };
 window.__shotReady = false;
-
-function route() {
-  const raw = location.hash.slice(1) || '/';
-  const [pathname, query = ''] = raw.split('?');
-  const parts = pathname.split('/').filter(Boolean).map(decodeURIComponent);
-  return { parts, query: new URLSearchParams(query) };
+function attachFilters() {
+  const refresh = () => {
+    selection = Object.fromEntries([ ["q", "search"], ["category", "category"], ["state", "state"], ["sort", "sort"] ].map(([key, id]) => [key, document.getElementById(id).value]));
+    surface.innerHTML = board(listings, selection);
+    attachFilters();
+  };
+  ["category", "state", "sort"].forEach(id => document.getElementById(id).addEventListener("change", refresh));
+  document.getElementById("search").addEventListener("input", refresh);
 }
-
-async function render() {
+async function showRoute() {
   window.__shotReady = false;
-  app.setAttribute('aria-busy', 'true');
-  app.innerHTML = '<p class="loading">Loading make.fun…</p>';
-  const { parts, query } = route();
+  surface.setAttribute("aria-busy", "true");
+  surface.innerHTML = '<p class="loading">Loading make.fun…</p>';
   try {
-    if (!parts.length) {
-      boardData ||= await getBounties();
-      document.title = 'Open bounties | make.fun';
-      app.innerHTML = board(boardData, boardFilters);
-      bindBoard();
-    } else if (parts[0] === 'bounty' && parts[1] && parts[2] === 'leaderboard') {
-      const [data, comp] = await Promise.all([getLeaderboard(parts[1], query.get('view') || ''), getBounty(parts[1])]);
-      document.title = `Leaderboard | ${comp.title || parts[1]} | make.fun`;
-      app.innerHTML = leaderboard({ ...data, competition: data.competition || comp }, parts[1], query.get('view') || '');
-      const button = document.querySelector('#show-more');
-      if (button) button.addEventListener('click', () => {
-        const rows = [...document.querySelectorAll('.leaderboard tbody tr')];
-        const visible = rows.findIndex(row => row.hidden);
-        const start = visible < 0 ? rows.length : visible;
-        rows.slice(start, start + 50).forEach(row => { row.hidden = false; });
-        const count = Math.min(start + 50, rows.length);
-        button.nextElementSibling.textContent = `${count} of ${rows.length} entries`;
-        if (count >= rows.length) button.remove();
-      });
-      document.querySelectorAll('.leaderboard tbody tr').forEach((row,i) => { if (i >= 50) row.hidden = true; });
-    } else if (parts[0] === 'bounty' && parts[1]) {
-      const data = await getBounty(parts[1]);
-      document.title = `${data.title} | make.fun`;
-      app.innerHTML = bounty(data);
-    } else if (parts[0] === 'u' && parts[1]) {
-      const data = await getProfile(parts[1]);
-      document.title = `${data.display_name || data.handle} | make.fun`;
-      app.innerHTML = profile(data);
-    } else {
-      app.innerHTML = errorView('This route is not available.');
-    }
+    const [path, search = ""] = (location.hash.slice(1) || "/").split("?");
+    const segments = path.split("/").filter(Boolean).map(decodeURIComponent);
+    const view = new URLSearchParams(search).get("view") || "";
+    const [kind, identifier, page] = segments;
+    if (!segments.length) {
+      listings ||= await getBounties();
+      document.title = "Open bounties | make.fun";
+      surface.innerHTML = board(listings, selection);
+      attachFilters();
+    } else if (kind === "bounty" && identifier && page === "leaderboard") {
+      const [results, details] = await Promise.all([getLeaderboard(identifier, view), getBounty(identifier)]);
+      document.title = `Leaderboard | ${details.title || identifier} | make.fun`;
+      const combined = { ...results, competition: results.competition || details };
+      let count = 50;
+      const draw = () => {
+        surface.innerHTML = leaderboard(combined, identifier, view, count);
+        document.getElementById("show-more")?.addEventListener("click", () => { count += 50; draw(); });
+      };
+      draw();
+    } else if (kind === "bounty" && identifier) {
+      const details = await getBounty(identifier);
+      document.title = `${details.title} | make.fun`;
+      surface.innerHTML = bounty(details);
+    } else if (kind === "u" && identifier) {
+      const maker = await getProfile(identifier);
+      document.title = `${maker.display_name || maker.handle} | make.fun`;
+      surface.innerHTML = profile(maker);
+    } else surface.innerHTML = errorView("This route is not available.");
     window.scrollTo(0, 0);
-  } catch (error) {
-    app.innerHTML = errorView(error.message || 'Please try again.');
+  } catch (failure) {
+    surface.innerHTML = errorView(failure.message || "Please try again.");
   }
-  app.setAttribute('aria-busy', 'false');
+  surface.setAttribute("aria-busy", "false");
   window.__shotReady = true;
 }
-
-function bindBoard() {
-  const update = () => {
-    boardFilters = { q: document.querySelector('#search').value, category: document.querySelector('#category').value, state: document.querySelector('#state').value, sort: document.querySelector('#sort').value };
-    app.innerHTML = board(boardData, boardFilters);
-    bindBoard();
-  };
-  for (const id of ['category','state','sort']) document.querySelector(`#${id}`).addEventListener('change', update);
-  document.querySelector('#search').addEventListener('input', update);
-}
-
-window.addEventListener('hashchange', render);
-render();
+window.addEventListener("hashchange", showRoute);
+showRoute();
 setInterval(() => {
-  document.querySelectorAll('[data-deadline]').forEach(node => {
-    const value = node.dataset.deadline;
-    node.textContent = left(value);
-    node.classList.toggle('urgent', !ended(value) && new Date(value) - Date.now() < 86400000);
-  });
-}, 30_000);
+  for (const element of document.querySelectorAll("[data-deadline]")) {
+    const stamp = element.dataset.deadline;
+    element.textContent = left(stamp);
+    element.classList.toggle("urgent", !ended(stamp) && new Date(stamp) - Date.now() < 86400000);
+  }
+}, 30000);
