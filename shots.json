@@ -1,17 +1,14 @@
 [
   {
-    "file": "1-board.jpg",
-    "path": "#/",
+    "file": "1-board.jpg", "path": "#/",
     "viewport": { "width": 1280, "height": 800 }
   },
   {
-    "file": "2-bounty.jpg",
-    "path": "#/bounty/tiny-chess-01",
+    "file": "2-bounty.jpg", "path": "#/bounty/tiny-chess-01",
     "viewport": { "width": 1280, "height": 800 }
   },
   {
-    "file": "3-leaderboard.jpg",
-    "path": "#/bounty/tiny-chess-01/leaderboard",
+    "file": "3-leaderboard.jpg", "path": "#/bounty/tiny-chess-01/leaderboard",
     "viewport": { "width": 1280, "height": 800 }
   }
 ]

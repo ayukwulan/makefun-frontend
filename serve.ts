@@ -1,58 +1,29 @@
-import { createServer as httpServer } from 'node:http';
-import { createReadStream as fileStream, realpathSync, statSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { createReadStream, realpathSync, statSync } from 'node:fs';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const documentRoot = resolve(fileURLToPath(new URL('app/', import.meta.url)));
-const flagPosition = process.argv.indexOf('--port');
-const requestedPort = flagPosition === -1 ? 8080 : Number(process.argv[flagPosition + 1]);
-const port = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort <= 65535 ? requestedPort : 8080;
-const mime = {
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.webmanifest': 'application/manifest+json'
-};
-const withinApp = candidate => candidate === documentRoot || candidate.startsWith(documentRoot + sep);
-
-httpServer((request, response) => {
-  let urlPath;
+const root = fileURLToPath(new URL('./app',import.meta.url));
+const flag = process.argv.indexOf('--port');
+const port = flag < 0 ? 8080 : Number(process.argv[flag + 1]);
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('--port requires an integer from 1 to 65535.');
+const types = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.json':'application/json', '.jpg':'image/jpeg', '.png':'image/png' };
+const inside = path => path.startsWith(root + sep);
+const server = createServer((request,response) => {
+  if (!['GET','HEAD'].includes(request.method || '')) { response.writeHead(405,{Allow:'GET, HEAD'}).end(); return; }
   try {
-    urlPath = decodeURIComponent(new URL(request.url || '/', 'http://localhost').pathname);
-  } catch {
-    response.writeHead(400).end('bad request');
-    return;
-  }
-  const relativeUrl = urlPath.endsWith('/') ? urlPath + 'index.html' : urlPath;
-  let diskPath = resolve(documentRoot, '.' + relativeUrl);
-  if (!withinApp(diskPath)) {
-    response.writeHead(403).end('forbidden');
-    return;
-  }
-  try {
-    diskPath = realpathSync(diskPath);
-    if (!withinApp(diskPath)) {
-      response.writeHead(403).end('forbidden');
-      return;
-    }
-    const metadata = statSync(diskPath);
-    if (!metadata.isFile()) throw new Error('File required');
-    response.writeHead(200, {
-      'cache-control': 'no-store',
-      'content-length': metadata.size,
-      'content-type': mime[extname(diskPath).toLowerCase()] || 'application/octet-stream'
-    });
-    fileStream(diskPath).pipe(response);
-  } catch {
-    response.writeHead(404).end('not found');
-  }
-}).listen(port, '127.0.0.1', () => console.log(`app/ is on http://localhost:${port}`));
+    const pathname = decodeURIComponent(new URL(request.url || '/','http://localhost').pathname);
+    const candidate = resolve(root,'.' + (pathname.endsWith('/') ? pathname + 'index.html' : pathname));
+    if (!inside(candidate)) { response.writeHead(403).end('Forbidden'); return; }
+    const path = realpathSync(candidate);
+    if (!inside(path)) { response.writeHead(403).end('Forbidden'); return; }
+    const file = statSync(path);
+    if (!file.isFile()) { response.writeHead(404).end('Not found'); return; }
+    response.writeHead(200, { 'Content-Type':(types[extname(path)] || 'application/octet-stream') + (['.html','.js','.css','.json'].includes(extname(path)) ? '; charset=utf-8' : ''), 'Content-Length':file.size, 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff' });
+    if (request.method === 'HEAD') response.end();
+    else createReadStream(path).on('error',() => response.destroy()).pipe(response);
+  } catch (error) { response.writeHead(error instanceof URIError ? 400 : 404).end('Not found'); }
+});
+server.on('error',error => { console.error(error.message); process.exitCode = 1; });
+server.listen(port,'127.0.0.1',() => console.log(`Serving make.fun at http://localhost:${port}`));
+for (const signal of ['SIGINT','SIGTERM']) process.on(signal,() => server.close(() => process.exit(0)));

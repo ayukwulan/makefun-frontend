@@ -1,25 +1,32 @@
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { resolve as absolutePath } from 'node:path';
-import { fileURLToPath as urlPath } from 'node:url';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-frontend.ts';
 
-const entryRoot = urlPath(new URL('./', import.meta.url));
-const destination = process.env.MAKEFUN_OUTPUT_DIR || '/output';
-mkdirSync(destination, { recursive: true });
+const root = fileURLToPath(new URL('.', import.meta.url));
+const output = resolve(process.env.MAKEFUN_OUTPUT_DIR || '/output');
+if (output === resolve(root) || ['app','screenshots','vendor'].some(name => output === join(root,name) || output.startsWith(join(root,name) + '/'))) throw new Error('Output cannot overwrite source files.');
+mkdirSync(output, { recursive: true });
 
-for (const subtree of ['app', 'screenshots']) {
-  const original = absolutePath(entryRoot, subtree);
-  const exported = absolutePath(destination, subtree);
-  mkdirSync(exported, { recursive: true });
-  if (existsSync(original)) cpSync(original, exported, { recursive: true });
+function exportTree(source, destination) {
+  mkdirSync(destination, { recursive: true });
+  for (const item of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source,item.name), to = join(destination,item.name);
+    if (item.isDirectory()) exportTree(from,to);
+    else if (item.isFile()) writeFileSync(to,readFileSync(from));
+    else throw new Error('Only ordinary files can be packaged: ' + from);
+  }
 }
-
-// These limits match the entry kit; inspect the exported tree when packaging.
-const entryLimits = {
-  text_max_bytes: 163_840,
-  screenshots: { max: 3, max_bytes: 262_144 },
+for (const directory of ['app','screenshots']) {
+  const destination = join(output,directory);
+  rmSync(destination, { recursive: true, force: true });
+  exportTree(join(root,directory),destination);
+}
+const dossier = buildDossier(output, {
+  text_max_bytes: 163840,
+  screenshots: { max: 3, max_bytes: 262144 },
   app_max_files: 993,
-  app_max_bytes: 16_777_216
-};
-const submission = buildDossier(destination, entryLimits);
-writeFileSync(absolutePath(destination, 'dossier.json'), submission);
+  app_max_bytes: 16777216
+});
+writeFileSync(join(output,'dossier.json'),dossier);
+console.log('Packaged app, screenshots, and dossier in ' + output);
