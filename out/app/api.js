@@ -1,42 +1,33 @@
-const origin = 'https://make.fun/api';
-const bodies = new Map();
-const pending = new Map();
-const freshFor = 60_000;
+const API = 'https://make.fun/api';
+const memory = new Map();
+const requests = new Map();
+const TTL = 60_000;
 
-export function requestJson(path) {
-  const cached = bodies.get(path);
-  if (cached && Date.now() - cached.timestamp < freshFor) {
-    return Promise.resolve(cached.data);
-  }
-  const existing = pending.get(path);
-  if (existing) return existing;
-
-  const operation = (async () => {
-    const response = await fetch(origin + path, {
-      headers: cached?.etag ? { 'If-None-Match': cached.etag } : {}
+export function get(path) {
+  if (!path.startsWith('/') || path.startsWith('//')) return Promise.reject(new Error('Invalid API path.'));
+  const saved = memory.get(path);
+  if (saved && Date.now() < saved.expires) return Promise.resolve(saved.body);
+  if (requests.has(path)) return requests.get(path);
+  const task = (async () => {
+    const response = await fetch(API + path, {
+      method: 'GET', mode: 'cors', credentials: 'omit',
+      headers: saved?.tag ? { 'If-None-Match': saved.tag } : {},
+      signal: AbortSignal.timeout(25_000), redirect: 'error'
     });
-    if (response.status === 304 && cached) {
-      cached.timestamp = Date.now();
-      return cached.data;
+    if (response.status === 304 && saved) {
+      saved.expires = Date.now() + TTL;
+      return saved.body;
     }
-    if (!response.ok) throw new Error(`make.fun returned ${response.status}`);
-    const data = await response.json();
-    bodies.set(path, {
-      data,
-      timestamp: Date.now(),
-      etag: response.headers.get('ETag')
-    });
-    return data;
-  })().finally(() => pending.delete(path));
-  pending.set(path, operation);
-  return operation;
+    if (!response.ok) throw new Error(response.status === 404 ? 'This bounty or maker could not be found.' : `make.fun returned ${response.status}. Please try again.`);
+    const body = await response.json();
+    memory.set(path, { body, tag: response.headers.get('etag'), expires: Date.now() + TTL });
+    return body;
+  })().finally(() => requests.delete(path));
+  requests.set(path, task);
+  return task;
 }
 
-const competitionUrl = name => '/competitions/' + encodeURIComponent(name);
-export const loadBoard = () => requestJson('/competitions?status=open&activity=times');
-export const loadCompetition = name => requestJson(competitionUrl(name));
-export const loadMaker = name => requestJson('/profiles/' + encodeURIComponent(name));
-export function loadResults(name, variant) {
-  const query = variant ? '?view=' + encodeURIComponent(variant) : '';
-  return requestJson(competitionUrl(name) + '/leaderboard' + query);
-}
+export const board = cursor => get('/competitions?status=open&activity=times' + (cursor != null ? '&cursor=' + encodeURIComponent(cursor) : ''));
+export const bounty = slug => get('/competitions/' + encodeURIComponent(slug));
+export const leaderboard = (slug, view) => get('/competitions/' + encodeURIComponent(slug) + '/leaderboard' + (view ? '?view=' + encodeURIComponent(view) : ''));
+export const profile = handle => get('/profiles/' + encodeURIComponent(handle));
