@@ -1,25 +1,42 @@
-const responses = new Map(), requests = new Map();
-const endpoint = "https://make.fun/api";
-export async function get(resource) {
-  const saved = responses.get(resource);
-  if (saved && Date.now() - saved.checked < 60000) return saved.payload;
-  if (requests.has(resource)) return requests.get(resource);
-  const task = (async () => {
-    const reply = await fetch(endpoint + resource, { headers: saved?.tag ? { "If-None-Match": saved.tag } : {} });
-    if (reply.status === 304 && saved) {
-      saved.checked = Date.now();
-      return saved.payload;
+const origin = 'https://make.fun/api';
+const bodies = new Map();
+const pending = new Map();
+const freshFor = 60_000;
+
+export function requestJson(path) {
+  const cached = bodies.get(path);
+  if (cached && Date.now() - cached.timestamp < freshFor) {
+    return Promise.resolve(cached.data);
+  }
+  const existing = pending.get(path);
+  if (existing) return existing;
+
+  const operation = (async () => {
+    const response = await fetch(origin + path, {
+      headers: cached?.etag ? { 'If-None-Match': cached.etag } : {}
+    });
+    if (response.status === 304 && cached) {
+      cached.timestamp = Date.now();
+      return cached.data;
     }
-    if (!reply.ok) throw Error(`make.fun returned ${reply.status}`);
-    const payload = await reply.json();
-    responses.set(resource, { payload, tag: reply.headers.get("ETag"), checked: Date.now() });
-    return payload;
-  })().finally(() => requests.delete(resource));
-  requests.set(resource, task);
-  return task;
+    if (!response.ok) throw new Error(`make.fun returned ${response.status}`);
+    const data = await response.json();
+    bodies.set(path, {
+      data,
+      timestamp: Date.now(),
+      etag: response.headers.get('ETag')
+    });
+    return data;
+  })().finally(() => pending.delete(path));
+  pending.set(path, operation);
+  return operation;
 }
-const competitionPath = slug => `/competitions/${encodeURIComponent(slug)}`;
-export const getProfile = handle => get(`/profiles/${encodeURIComponent(handle)}`);
-export const getBounty = slug => get(competitionPath(slug));
-export const getBounties = () => get("/competitions?status=open&activity=times");
-export const getLeaderboard = (slug, view) => get(competitionPath(slug) + "/leaderboard" + (view ? `?view=${encodeURIComponent(view)}` : ""));
+
+const competitionUrl = name => '/competitions/' + encodeURIComponent(name);
+export const loadBoard = () => requestJson('/competitions?status=open&activity=times');
+export const loadCompetition = name => requestJson(competitionUrl(name));
+export const loadMaker = name => requestJson('/profiles/' + encodeURIComponent(name));
+export function loadResults(name, variant) {
+  const query = variant ? '?view=' + encodeURIComponent(variant) : '';
+  return requestJson(competitionUrl(name) + '/leaderboard' + query);
+}

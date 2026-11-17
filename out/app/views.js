@@ -1,83 +1,168 @@
-import { esc, money, date, left, ended, pot, initials, short } from "./format.js";
-const encode = encodeURIComponent;
-const avatarLetters = label => esc(initials(label));
-const category = item => item.category || item.categoryName || "Other";
-const soon = stamp => !ended(stamp) && new Date(stamp) - Date.now() < 86400000;
-const clock = item => `<span data-deadline="${esc(item.deadline)}" class="time ${soon(item.deadline) ? "urgent" : ""}">${left(item.deadline)}</span>`;
-const option = (value, label, chosen) => `<option value="${value}" ${chosen === value ? "selected" : ""}>${label}</option>`;
-function prose(source) {
-  return esc(source || "").split("\n").map(part => {
-    const heading = /^(#{1,3})\s+(.*)$/.exec(part);
-    if (heading) return `<h${heading[1].length}>${heading[2]}</h${heading[1].length}>`;
-    if (/^[-*]\s+/.test(part)) return `<p class="rule-item">• ${part.slice(2)}</p>`;
-    if (!part) return "<br>";
-    return `<p>${part.replace(/\*\*(.*?)\*\*/g, "<b>$1</b>").replace(/\*(.*?)\*/g, "<i>$1</i>")}</p>`;
-  }).join("");
+import { htmlText as safe, dollars, calendar, timeRemaining, deadlinePassed, livePot, monogram, walletLabel } from './format.js';
+
+const routePart = encodeURIComponent;
+const categoryOf = contest => contest.category || contest.categoryName || 'Other';
+const closesSoon = timestamp => !deadlinePassed(timestamp) && new Date(timestamp) - Date.now() < 86_400_000;
+const selectedOption = (key, caption, current) => `<option ${current === key ? 'selected' : ''} value="${key}">${caption}</option>`;
+const timeNode = contest => `<span class="time ${closesSoon(contest.deadline) ? 'urgent' : ''}" data-deadline="${safe(contest.deadline)}">${timeRemaining(contest.deadline)}</span>`;
+const headings = captions => '<thead><tr>' + captions.map(caption => `<th>${caption}</th>`).join('') + '</tr></thead>';
+
+export function renderFailure(message) {
+  return `<section class="error"><p class="eyebrow">CONNECTION ISSUE</p><h1>We could not load this page.</h1><p>${safe(message)}</p><a href="#/">Return to bounties</a></section>`;
 }
-function listingRow(item) {
-  return `<li class="bounty-row"><div class="row-main"><span class="category">${esc(category(item))}</span><a href="#/bounty/${encode(item.slug)}" class="row-title">${esc(item.title)}</a><p>${esc(item.summary || item.description || "")}</p></div><div class="row-pot"><strong>${money(pot(item))}</strong><small>live pot</small>${Number(item.entryFeeUsd || 0) ? `<span class="muted">${money(item.entryFeeUsd)} fee</span>` : ""}</div><div class="row-deadline">${clock(item)}<small>${date(item.deadline)}</small></div><div class="row-entries"><strong>${Number(item.submissionCount || 0)}</strong><small>entries</small></div></li>`;
+
+function markdownParagraphs(rawText) {
+  return safe(rawText || '').split('\n').map(line => {
+    const match = line.match(/^(#{1,3})\s+(.*)$/);
+    if (match) {
+      const level = match[1].length;
+      return `<h${level}>${match[2]}</h${level}>`;
+    }
+    if (/^[-*]\s+/.test(line)) return `<p class="rule-item">• ${line.substring(2)}</p>`;
+    if (line === '') return '<br>';
+    const inline = line.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\*(.*?)\*/g, '<i>$1</i>');
+    return `<p>${inline}</p>`;
+  }).join('');
 }
-export function board(payload, controls = {}) {
-  const collection = payload.items || [];
-  const categories = [...new Set(collection.map(category))].sort((first, second) => first.localeCompare(second));
-  const ordering = controls.sort || "deadline";
-  const matches = collection.filter(item => {
-    if (controls.q && !`${item.title} ${item.summary || ""} ${category(item)}`.toLowerCase().includes(controls.q.toLowerCase())) return false;
-    if (controls.category && controls.category !== "all" && category(item) !== controls.category) return false;
-    if (controls.state === "soon") return soon(item.deadline);
-    return controls.state !== "ended" || ended(item.deadline);
-  });
-  const comparators = {
-    deadline: (first, second) => new Date(first.deadline) - new Date(second.deadline),
-    pot: (first, second) => pot(second) - pot(first),
-    entries: (first, second) => Number(second.submissionCount || 0) - Number(first.submissionCount || 0),
-    title: (first, second) => String(first.title).localeCompare(String(second.title))
+
+function boardEntry(contest) {
+  const fee = Number(contest.entryFeeUsd || 0)
+    ? `<span class="muted">${dollars(contest.entryFeeUsd)} fee</span>` : '';
+  return `<li class="bounty-row">
+<div class="row-main"><span class="category">${safe(categoryOf(contest))}</span><a class="row-title" href="#/bounty/${routePart(contest.slug)}">${safe(contest.title)}</a><p>${safe(contest.summary || contest.description || '')}</p></div>
+<div class="row-pot"><strong>${dollars(livePot(contest))}</strong><small>live pot</small>${fee}</div>
+<div class="row-deadline">${timeNode(contest)}<small>${calendar(contest.deadline)}</small></div>
+<div class="row-entries"><strong>${Number(contest.submissionCount || 0)}</strong><small>entries</small></div></li>`;
+}
+
+export function renderBoard(response, choice = {}) {
+  const all = response.items || [];
+  const sortKey = choice.sort || 'deadline';
+  const categoryNames = [...new Set(all.map(categoryOf))].sort((a, b) => a.localeCompare(b));
+  const ordering = {
+    title: (a, b) => String(a.title).localeCompare(String(b.title)),
+    entries: (a, b) => Number(b.submissionCount || 0) - Number(a.submissionCount || 0),
+    pot: (a, b) => livePot(b) - livePot(a),
+    deadline: (a, b) => new Date(a.deadline) - new Date(b.deadline)
   };
-  matches.sort(comparators[ordering] || comparators.deadline);
-  const liveTotal = collection.reduce((sum, item) => sum + (ended(item.deadline) ? 0 : pot(item)), 0);
-  return `<section class="page-head"><div><p class="eyebrow">MAKE.FUN / OPEN CALLS</p><h1>Build something worth backing.</h1><p class="subhead">Live bounties, open competitions, and the people making them.</p></div><div class="total"><span>Total live pots</span><strong>${money(liveTotal)}</strong></div></section>
-<section aria-label="Filter bounties" class="filters"><label class="search">⌕ <input type="search" id="search" placeholder="Search bounties" aria-label="Search bounties" value="${esc(controls.q || "")}"></label><label>Category <select id="category"><option value="all">All categories</option>${categories.map(name => `<option ${controls.category === name ? "selected" : ""}>${esc(name)}</option>`).join("")}</select></label><label>State <select id="state">${[["all", "All"], ["soon", "Closing soon"], ["ended", "Ended"]].map(([value, label]) => option(value, label, controls.state || "all")).join("")}</select></label><label>Sort <select id="sort">${[["deadline", "Deadline"], ["pot", "Pot"], ["entries", "Entries"], ["title", "Title"]].map(([value, label]) => option(value, label, ordering)).join("")}</select></label></section>
-<div class="table-label"><span>${matches.length} bounties</span><span>REWARD / DEADLINE / ENTRIES</span></div><ul class="board">${matches.map(listingRow).join("") || '<li class="empty">No bounties match these filters.</li>'}</ul>`;
+  const visible = all.filter(contest => {
+    const haystack = `${contest.title} ${contest.summary || ''} ${categoryOf(contest)}`.toLowerCase();
+    if (choice.q && !haystack.includes(choice.q.toLowerCase())) return false;
+    if (choice.category && choice.category !== 'all' && categoryOf(contest) !== choice.category) return false;
+    if (choice.state === 'soon') return closesSoon(contest.deadline);
+    if (choice.state === 'ended') return deadlinePassed(contest.deadline);
+    return true;
+  }).sort(ordering[sortKey] || ordering.deadline);
+  const total = all.reduce((amount, contest) => amount + (deadlinePassed(contest.deadline) ? 0 : livePot(contest)), 0);
+  const categories = categoryNames.map(name => `<option ${choice.category === name ? 'selected' : ''}>${safe(name)}</option>`).join('');
+  const states = [['all', 'All'], ['soon', 'Closing soon'], ['ended', 'Ended']]
+    .map(([key, caption]) => selectedOption(key, caption, choice.state || 'all')).join('');
+  const sorts = [['deadline', 'Deadline'], ['pot', 'Pot'], ['entries', 'Entries'], ['title', 'Title']]
+    .map(([key, caption]) => selectedOption(key, caption, sortKey)).join('');
+  return `<section class="page-head"><div><p class="eyebrow">MAKE.FUN / OPEN CALLS</p><h1>Build something worth backing.</h1><p class="subhead">Live bounties, open competitions, and the people making them.</p></div><div class="total"><span>Total live pots</span><strong>${dollars(total)}</strong></div></section>
+<section class="filters" aria-label="Filter bounties"><label class="search">⌕ <input id="search" type="search" value="${safe(choice.q || '')}" aria-label="Search bounties" placeholder="Search bounties"></label><label>Category <select id="category"><option value="all">All categories</option>${categories}</select></label><label>State <select id="state">${states}</select></label><label>Sort <select id="sort">${sorts}</select></label></section>
+<div class="table-label"><span>${visible.length} bounties</span><span>REWARD / DEADLINE / ENTRIES</span></div><ul class="board">${visible.map(boardEntry).join('') || '<li class="empty">No bounties match these filters.</li>'}</ul>`;
 }
-function rewardRows(item) {
-  if (Array.isArray(item.rewardsNow) && item.rewardsNow.length) return item.rewardsNow;
-  if (!item.rewards || typeof item.rewards !== "object" || Array.isArray(item.rewards)) return [];
-  return Object.entries(item.rewards).sort(([first], [second]) => Number(first) - Number(second)).map(([place, amount]) => ({ place, baseUsd: amount, feeShareUsd: 0, amountUsd: amount }));
+
+function currentRewards(contest) {
+  if (Array.isArray(contest.rewardsNow) && contest.rewardsNow.length > 0) return contest.rewardsNow;
+  const base = contest.rewards;
+  if (!base || typeof base !== 'object' || Array.isArray(base)) return [];
+  return Object.keys(base).sort((a, b) => Number(a) - Number(b)).map(position => ({
+    place: position, baseUsd: base[position], feeShareUsd: 0, amountUsd: base[position]
+  }));
 }
-export function bounty(item) {
-  const recent = (item.submissions || []).slice(0, 8);
-  const route = `#/bounty/${encode(item.slug)}`;
-  const status = ended(item.deadline) ? "Ended" : item.acceptingSubmissions === false ? "Not accepting" : "Open";
-  const facts = [["Status", status], ["Entry fee", Number(item.entryFeeUsd || 0) ? money(item.entryFeeUsd) : "Free"], ["Entries", Number(item.submissionCount || recent.length)], ["Opened", date(item.openedAt || item.opensAt || item.createdAt)], ["Deadline", date(item.deadline)]];
-  return `<p class="crumb"><a href="#/">← All bounties</a><span> / ${esc(item.category || "Competition")}</span></p><section class="detail-head"><div><p class="eyebrow">OPEN BOUNTY</p><h1>${esc(item.title)}</h1><p class="subhead">${esc(item.summary || "")}</p></div><div class="detail-pot"><span>Current live pot</span><strong>${money(pot(item))}</strong><span class="${ended(item.deadline) ? "urgent" : ""}">${left(item.deadline)}</span></div></section>
-<nav class="tabs"><a href="${route}" class="active">Overview</a><a href="${route}/leaderboard">Leaderboard</a>${item.url ? `<a href="${esc(item.url)}" rel="noopener" target="_blank">make.fun ↗</a>` : ""}</nav>
-<div class="detail-grid"><div class="detail-copy"><h2>About this bounty</h2><div class="prose">${prose(item.description)}</div><h2>Rules</h2><div class="prose rules">${prose(item.rules || "No additional rules provided.")}</div></div><aside class="detail-side"><h2>At a glance</h2><dl>${facts.map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`).join("")}</dl><h2>Rewards</h2><div class="scroll-table"><table><thead><tr><th>Place</th><th>Base prize</th><th>Fee share</th><th>Now</th></tr></thead><tbody>${rewardRows(item).map(prize => `<tr><td>${esc(prize.place)}</td><td>${money(prize.baseUsd)}</td><td>${money(prize.feeShareUsd)}</td><td class="green">${money(prize.amountUsd)}</td></tr>`).join("") || '<tr><td colspan="4">Prize details unavailable</td></tr>'}</tbody></table></div></aside></div>
-<section class="submissions"><div class="section-title"><h2>Latest submissions</h2><a href="${route}/leaderboard">Full leaderboard →</a></div>${recent.length ? `<div class="submission-list">${recent.map(entry => `<a href="#/u/${encode(entry.handle || entry.user?.handle || "")}"><span class="avatar mini">${avatarLetters(entry.handle || entry.title)}</span><span><b>${esc(entry.title || "Submission")}</b><small>${esc(entry.handle || entry.user?.handle || "maker")}</small></span><span class="muted">${date(entry.createdAt || entry.submittedAt)}</span></a>`).join("")}</div>` : '<p class="muted">No submissions yet.</p>'}</section>`;
+
+function recentSubmissions(submitted) {
+  if (!submitted.length) return '<p class="muted">No submissions yet.</p>';
+  const cards = submitted.map(solution => {
+    const handle = solution.handle || solution.user?.handle || '';
+    return `<a href="#/u/${routePart(handle)}"><span class="avatar mini">${safe(monogram(solution.handle || solution.title))}</span><span><b>${safe(solution.title || 'Submission')}</b><small>${safe(handle || 'maker')}</small></span><span class="muted">${calendar(solution.createdAt || solution.submittedAt)}</span></a>`;
+  });
+  return '<div class="submission-list">' + cards.join('') + '</div>';
 }
-export function leaderboard(payload, slug, activeView = "", visibleCount = 50) {
-  const fields = (payload.columns || []).filter(field => !field.hidden);
-  const entries = payload.entries || [];
-  const variants = payload.views || [];
-  const phaseLabel = typeof payload.phase === "string" ? payload.phase : payload.phase?.title || payload.phase?.key || "Results";
-  const route = `#/bounty/${encode(slug)}`;
-  const tabs = variants.length > 1 ? `<nav aria-label="Leaderboard view" class="view-tabs">${variants.map(variant => {
-    const label = typeof variant === "string" ? variant : variant.name || variant.label || variant.id;
-    return `<a href="${route}/leaderboard?view=${encode(label)}" class="${label === activeView ? "selected" : ""}">${esc(label)}</a>`;
-  }).join("")}</nav>` : "";
-  const tableRows = entries.slice(0, visibleCount).map(entry => {
-    const metrics = fields.map(field => {
-      const key = field.key || field.name || field.id;
-      return `<td>${esc(entry.display?.[key] ?? entry.display?.[field.label] ?? entry.values?.[key] ?? "")}</td>`;
-    }).join("");
-    return `<tr><td><span class="rank">${esc(entry.rank)}</span>${entry.prize_rank ? `<span class="prize-badge">${esc(entry.prize_rank)}</span>` : ""}</td><td><a href="#/u/${encode(entry.handle || "")}">@${esc(entry.handle || "maker")}</a></td><td>${esc(entry.title || "Untitled entry")}</td>${metrics}</tr>`;
-  }).join("");
-  return `<p class="crumb"><a href="${route}">← Bounty overview</a></p><section class="page-head compact"><div><p class="eyebrow">COMPETITION RESULTS</p><h1>${esc(payload.competition?.title || slug)} leaderboard</h1></div><span class="live-tag">${esc(phaseLabel)}</span></section>${tabs}<div class="scroll-table leaderboard"><table><thead><tr><th>Rank</th><th>Maker</th><th>Entry</th>${fields.map(field => `<th>${esc(field.title || field.label || field.name || field.key)}</th>`).join("")}</tr></thead><tbody>${tableRows}</tbody></table></div>${entries.length > visibleCount ? `<div class="more-wrap"><button id="show-more">Show 50 more</button><span class="muted">${Math.min(visibleCount, entries.length)} of ${entries.length} entries</span></div>` : `<p class="muted row-count">${entries.length} entries</p>`}`;
+
+export function renderBounty(contest) {
+  const baseRoute = '#/bounty/' + routePart(contest.slug);
+  const submitted = (contest.submissions || []).slice(0, 8);
+  const closed = deadlinePassed(contest.deadline);
+  const state = closed ? 'Ended' : contest.acceptingSubmissions === false ? 'Not accepting' : 'Open';
+  const facts = [
+    ['Status', state],
+    ['Entry fee', Number(contest.entryFeeUsd || 0) ? dollars(contest.entryFeeUsd) : 'Free'],
+    ['Entries', Number(contest.submissionCount || submitted.length)],
+    ['Opened', calendar(contest.openedAt || contest.opensAt || contest.createdAt)],
+    ['Deadline', calendar(contest.deadline)]
+  ].map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`).join('');
+  const payouts = currentRewards(contest).map(reward => `<tr><td>${safe(reward.place)}</td><td>${dollars(reward.baseUsd)}</td><td>${dollars(reward.feeShareUsd)}</td><td class="green">${dollars(reward.amountUsd)}</td></tr>`).join('');
+  const external = contest.url ? `<a target="_blank" href="${safe(contest.url)}" rel="noopener">make.fun ↗</a>` : '';
+  return `<p class="crumb"><a href="#/">← All bounties</a><span> / ${safe(contest.category || 'Competition')}</span></p>
+<section class="detail-head"><div><p class="eyebrow">OPEN BOUNTY</p><h1>${safe(contest.title)}</h1><p class="subhead">${safe(contest.summary || '')}</p></div><div class="detail-pot"><span>Current live pot</span><strong>${dollars(livePot(contest))}</strong><span class="${closed ? 'urgent' : ''}">${timeRemaining(contest.deadline)}</span></div></section>
+<nav class="tabs"><a class="active" href="${baseRoute}">Overview</a><a href="${baseRoute}/leaderboard">Leaderboard</a>${external}</nav>
+<div class="detail-grid"><div class="detail-copy"><h2>About this bounty</h2><div class="prose">${markdownParagraphs(contest.description)}</div><h2>Rules</h2><div class="prose rules">${markdownParagraphs(contest.rules || 'No additional rules provided.')}</div></div><aside class="detail-side"><h2>At a glance</h2><dl>${facts}</dl><h2>Rewards</h2><div class="scroll-table"><table>${headings(['Place', 'Base prize', 'Fee share', 'Now'])}<tbody>${payouts || '<tr><td colspan="4">Prize details unavailable</td></tr>'}</tbody></table></div></aside></div>
+<section class="submissions"><div class="section-title"><h2>Latest submissions</h2><a href="${baseRoute}/leaderboard">Full leaderboard →</a></div>${recentSubmissions(submitted)}</section>`;
 }
-export function profile(maker) {
-  const stats = maker.record || {};
-  const picture = maker.image || maker.avatar;
-  const links = [["GitHub", maker.github_login, `https://github.com/${encode(maker.github_login || "")}`], ["X", maker.x, `https://x.com/${encode(maker.x || "")}`], ["Discord", maker.discord, null]];
-  const totals = [[stats.entered ?? stats.entered_count ?? 0, "Entered"], [stats.placed ?? stats.placed_count ?? 0, "Placed"], [money(stats.won ?? stats.won_usd ?? 0), "Won"], [stats.best_place ?? stats.bestPlacement ?? "—", "Best place"], [money(stats.prize ?? stats.prize_usd ?? 0), "Total prizes"]];
-  return `<p class="crumb"><a href="#/">← Bounties</a></p><section class="profile-head"><div class="profile-avatar">${picture ? `<img crossorigin="anonymous" loading="lazy" src="${esc(picture)}" alt="">` : esc(initials(maker.display_name || maker.handle))}</div><div class="profile-intro"><p class="eyebrow">MAKER PROFILE</p><h1>${esc(maker.display_name || maker.handle)}</h1><p class="handle">@${esc(maker.handle)}</p><p>${esc(maker.bio || "No bio yet.")}</p><nav class="social-links">${links.filter(([, value]) => value).map(([label, value, url]) => url ? `<a target="_blank" rel="noopener" href="${url}">${esc(label)} ↗</a>` : `<span>${esc(label)}: ${esc(value)}</span>`).join("")}</nav></div><aside class="wallet">${maker.wallet?.address ? `<span>Wallet</span><a target="_blank" rel="noopener" href="${esc(maker.wallet.explorer_url || `https://solscan.io/account/${maker.wallet.address}`)}">${esc(short(maker.wallet.address))} ↗</a>` : ""}<small>Joined ${date(maker.joined_at)}</small></aside></section><section class="record-stats">${totals.map(([value, label]) => `<div><strong>${value}</strong><span>${label}</span></div>`).join("")}</section><section class="entries"><h2>Competition entries</h2><div class="scroll-table"><table><thead><tr><th>Bounty</th><th>Place</th><th>Score</th><th>Prize</th><th>Entered</th></tr></thead><tbody>${(maker.solutions || []).map(entry => `<tr><td><a href="#/bounty/${encode(entry.competition?.slug || entry.competition?.id || "")}">${esc(entry.competition?.title || entry.competition?.name || "Competition")}</a></td><td>${esc(entry.placement ?? "—")}</td><td>${esc(entry.score?.display ?? entry.score?.value ?? "—")}</td><td class="green">${money(entry.prize_usd)}</td><td>${date(entry.entered_at)}</td></tr>`).join("") || '<tr><td colspan="5">No entries yet.</td></tr>'}</tbody></table></div></section>`;
+
+function resultTabs(variants, selected, baseRoute) {
+  if (variants.length <= 1) return '';
+  const links = variants.map(variant => {
+    const caption = typeof variant === 'string' ? variant : variant.name || variant.label || variant.id;
+    return `<a class="${caption === selected ? 'selected' : ''}" href="${baseRoute}/leaderboard?view=${routePart(caption)}">${safe(caption)}</a>`;
+  });
+  return '<nav class="view-tabs" aria-label="Leaderboard view">' + links.join('') + '</nav>';
 }
-export const errorView = detail => `<section class="error"><p class="eyebrow">CONNECTION ISSUE</p><h1>We could not load this page.</h1><p>${esc(detail)}</p><a href="#/">Return to bounties</a></section>`;
+
+export function renderResults(response, name, variant = '', rowLimit = 50) {
+  const baseRoute = '#/bounty/' + routePart(name);
+  const fields = (response.columns || []).filter(column => !column.hidden);
+  const scores = response.entries || [];
+  const phase = typeof response.phase === 'string' ? response.phase : response.phase?.title || response.phase?.key || 'Results';
+  const rows = scores.slice(0, rowLimit).map(solution => {
+    const cells = fields.map(column => {
+      const key = column.key || column.name || column.id;
+      const value = solution.display?.[key] ?? solution.display?.[column.label] ?? solution.values?.[key] ?? '';
+      return `<td>${safe(value)}</td>`;
+    }).join('');
+    const badge = solution.prize_rank ? `<span class="prize-badge">${safe(solution.prize_rank)}</span>` : '';
+    return `<tr><td><span class="rank">${safe(solution.rank)}</span>${badge}</td><td><a href="#/u/${routePart(solution.handle || '')}">@${safe(solution.handle || 'maker')}</a></td><td>${safe(solution.title || 'Untitled entry')}</td>${cells}</tr>`;
+  }).join('');
+  const labels = ['Rank', 'Maker', 'Entry', ...fields.map(column => safe(column.title || column.label || column.name || column.key))];
+  const continuation = scores.length > rowLimit
+    ? `<div class="more-wrap"><button id="show-more">Show 50 more</button><span class="muted">${Math.min(rowLimit, scores.length)} of ${scores.length} entries</span></div>`
+    : `<p class="muted row-count">${scores.length} entries</p>`;
+  return `<p class="crumb"><a href="${baseRoute}">← Bounty overview</a></p><section class="page-head compact"><div><p class="eyebrow">COMPETITION RESULTS</p><h1>${safe(response.competition?.title || name)} leaderboard</h1></div><span class="live-tag">${safe(phase)}</span></section>${resultTabs(response.views || [], variant, baseRoute)}<div class="scroll-table leaderboard"><table>${headings(labels)}<tbody>${rows}</tbody></table></div>${continuation}`;
+}
+
+function makerLinks(person) {
+  const contacts = [
+    ['GitHub', person.github_login, 'https://github.com/' + routePart(person.github_login || '')],
+    ['X', person.x, 'https://x.com/' + routePart(person.x || '')],
+    ['Discord', person.discord, null]
+  ];
+  return contacts.filter(contact => contact[1]).map(([label, value, url]) => url
+    ? `<a href="${url}" rel="noopener" target="_blank">${safe(label)} ↗</a>`
+    : `<span>${safe(label)}: ${safe(value)}</span>`).join('');
+}
+
+export function renderMaker(person) {
+  const record = person.record || {};
+  const pictureUrl = person.image || person.avatar;
+  const avatar = pictureUrl
+    ? `<img crossorigin="anonymous" loading="lazy" src="${safe(pictureUrl)}" alt="">`
+    : safe(monogram(person.display_name || person.handle));
+  const statistics = [
+    [record.entered ?? record.entered_count ?? 0, 'Entered'],
+    [record.placed ?? record.placed_count ?? 0, 'Placed'],
+    [dollars(record.won ?? record.won_usd ?? 0), 'Won'],
+    [record.best_place ?? record.bestPlacement ?? '—', 'Best place'],
+    [dollars(record.prize ?? record.prize_usd ?? 0), 'Total prizes']
+  ].map(([value, label]) => `<div><strong>${value}</strong><span>${label}</span></div>`).join('');
+  const address = person.wallet?.address;
+  const wallet = address ? `<span>Wallet</span><a rel="noopener" href="${safe(person.wallet.explorer_url || 'https://solscan.io/account/' + address)}" target="_blank">${safe(walletLabel(address))} ↗</a>` : '';
+  const entries = (person.solutions || []).map(solution => {
+    const competition = solution.competition;
+    return `<tr><td><a href="#/bounty/${routePart(competition?.slug || competition?.id || '')}">${safe(competition?.title || competition?.name || 'Competition')}</a></td><td>${safe(solution.placement ?? '—')}</td><td>${safe(solution.score?.display ?? solution.score?.value ?? '—')}</td><td class="green">${dollars(solution.prize_usd)}</td><td>${calendar(solution.entered_at)}</td></tr>`;
+  }).join('');
+  return `<p class="crumb"><a href="#/">← Bounties</a></p><section class="profile-head"><div class="profile-avatar">${avatar}</div><div class="profile-intro"><p class="eyebrow">MAKER PROFILE</p><h1>${safe(person.display_name || person.handle)}</h1><p class="handle">@${safe(person.handle)}</p><p>${safe(person.bio || 'No bio yet.')}</p><nav class="social-links">${makerLinks(person)}</nav></div><aside class="wallet">${wallet}<small>Joined ${calendar(person.joined_at)}</small></aside></section>
+<section class="record-stats">${statistics}</section><section class="entries"><h2>Competition entries</h2><div class="scroll-table"><table>${headings(['Bounty', 'Place', 'Score', 'Prize', 'Entered'])}<tbody>${entries || '<tr><td colspan="5">No entries yet.</td></tr>'}</tbody></table></div></section>`;
+}
