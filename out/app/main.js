@@ -1,109 +1,217 @@
-import * as api from './api.js';
-import { timeLeft, soon, ended } from './format.js';
-import { filters, boardPage, boardItems, loading, failure } from './views.js';
+import { fetchBoard, fetchBounty, fetchStandings, fetchMaker, observeRequests } from './api.js';
+import { countdown, closingSoon, hasEnded, escapeHTML } from './format.js';
+import {
+  Board, masthead, workspace, patchHTML, text, loadingPane, errorPane,
+  welcomePane, bountyPane, leaderboardPane, profilePane
+} from './views.js';
 
-const main = document.querySelector('main');
-const choice = { ...filters };
-let generation = 0;
 window.__shotReady = false;
-document.querySelector('.skip').addEventListener('click', event => { event.preventDefault(); main.focus(); main.scrollIntoView(); });
-main.addEventListener('error', event => { if (event.target.tagName === 'IMG') event.target.remove(); }, true);
+const stylesheet = document.createElement('link');
+stylesheet.rel = 'stylesheet';
+const styled = new Promise((resolve, reject) => {
+  stylesheet.addEventListener('load', resolve, { once: true });
+  stylesheet.addEventListener('error', () => reject(new Error('The stylesheet could not load. Reload this page.')), { once: true });
+});
+stylesheet.href = new URL('./style.css', import.meta.url).href;
+document.head.append(stylesheet);
 
-function wireBoard(items, cursor) {
-  const current = generation;
-  const form = main.querySelector('form');
-  const refresh = () => {
-    Object.assign(choice,Object.fromEntries(new FormData(form)));
-    const result = boardItems(items,choice);
-    main.querySelector('#bounty-list').innerHTML = result.html;
-    main.querySelector('#match-count').textContent = result.count;
-  };
-  form.addEventListener('submit', event => event.preventDefault());
-  form.addEventListener('input', refresh);
-  form.addEventListener('change', refresh);
-  main.querySelector('#bounty-list').addEventListener('click', event => {
-    if (!event.target.closest('[data-reset]')) return;
-    Object.assign(choice,filters);
-    for (const [key,value] of Object.entries(choice)) form.elements[key].value = value;
-    refresh();
-    form.elements.q.focus();
-  });
-  if (cursor) {
-    const button = document.createElement('button');
-    button.textContent = 'Load more bounties';
-    main.querySelector('#board-more').append(button);
-    button.addEventListener('click', async () => {
-      button.disabled = true;
-      try {
-        const page = await api.board(cursor);
-        if (current !== generation) return;
-        items.push(...(page.items || []));
-        main.innerHTML = boardPage(items,choice);
-        wireBoard(items,page.next_cursor);
-      } catch { button.textContent = 'Couldn’t load more. Try again'; button.disabled = false; }
-    });
+function parseRoute() {
+  const raw = location.hash.slice(1) || '/';
+  const question = raw.indexOf('?');
+  const path = question < 0 ? raw : raw.slice(0, question);
+  const query = new URLSearchParams(question < 0 ? '' : raw.slice(question + 1));
+  const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
+  if (!parts.length) return { kind: 'welcome', key: 'welcome' };
+  if (parts[0] === 'bounty' && parts[1] && parts.length === 2) return { kind: 'bounty', slug: parts[1], key: 'bounty-' + parts[1] };
+  if (parts[0] === 'bounty' && parts[1] && parts[2] === 'leaderboard' && parts.length === 3) {
+    return { kind: 'leaderboard', slug: parts[1], view: query.get('view'), key: 'leaderboard-' + parts[1] };
   }
+  if (parts[0] === 'u' && parts[1] && parts.length === 2) return { kind: 'profile', handle: parts[1], key: 'profile-' + parts[1] };
+  throw new Error('That view does not exist. Pick a bounty from the board to keep exploring.');
 }
-function wireLeaderboard(data, rows) {
-  let shown = 50;
-  const button = main.querySelector('#show-more');
-  button?.addEventListener('click', () => {
-    main.querySelector('tbody').insertAdjacentHTML('beforeend',rows(data,shown,shown + 50));
-    shown = Math.min(shown + 50,data.entries.length);
-    main.querySelector('#shown-count').textContent = `Showing ${shown} of ${data.entries.length.toLocaleString('en-US')} entries`;
-    if (shown >= data.entries.length) { button.disabled = true; button.textContent = 'All entries shown'; }
+
+async function start() {
+  await styled;
+  const app = document.querySelector('#app');
+  document.querySelector('header').className = 'header';
+  patchHTML(document.querySelector('header'), masthead());
+  app.className = 'workspace';
+  app.setAttribute('aria-busy', 'true');
+  patchHTML(app, workspace());
+  document.body.insertAdjacentHTML('afterbegin', '<a class="skip" href="#detail">Skip to detail pane</a><a class="skip skip-board" href="#board">Skip to bounty board</a>');
+  const board = new Board(document.querySelector('#board'));
+  const detail = document.querySelector('#detail');
+  const pane = document.querySelector('#pane');
+  const paneNote = document.querySelector('#pane-note');
+  const boardNote = document.querySelector('#board-note');
+  const refreshButton = document.querySelector('[data-action="refresh"]');
+  const moreBounties = document.querySelector('#board-more');
+  const pages = new Map();
+  let nextCursor = null, route = null, routeData = null, generation = 0;
+  let pageStart = 0, firstRoute = true, refreshing = false;
+
+  observeRequests(({ total, board: count }) => {
+    text(document.querySelector('#request-count'), `${total} API request${total === 1 ? '' : 's'}`);
+    text(document.querySelector('#board-requests'), `${count} API request${count === 1 ? '' : 's'}`);
   });
-}
-async function navigate() {
-  const token = ++generation;
-  window.__shotReady = false;
-  main.setAttribute('aria-busy','true');
-  main.innerHTML = loading();
-  try {
-    const [path,query = ''] = (location.hash.slice(1) || '/').split('?');
-    const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
-    let html, title, mount;
-    if (!parts.length) {
-      const data = await api.board();
-      const items = data.items || [];
-      html = boardPage(items,choice); title = 'Find your next build'; mount = () => wireBoard(items,data.next_cursor);
-    } else if (parts[0] === 'bounty' && parts[1] && parts.length === 2) {
-      const [data,pages] = await Promise.all([api.bounty(parts[1]),import('./pages.js')]);
-      await pages.ready;
-      html = pages.bountyPage(data); title = data.title;
-    } else if (parts[0] === 'bounty' && parts[1] && parts[2] === 'leaderboard' && parts.length === 3) {
-      const view = new URLSearchParams(query).get('view');
-      const [data,c,pages] = await Promise.all([api.leaderboard(parts[1],view),api.bounty(parts[1]),import('./pages.js')]);
-      await pages.ready;
-      html = pages.leaderboardPage(data,parts[1],c); title = `Leaderboard · ${c.title}`; mount = () => wireLeaderboard(data,pages.leaderboardRows);
-    } else if (parts[0] === 'u' && parts[1] && parts.length === 2) {
-      const [data,pages] = await Promise.all([api.profile(parts[1]),import('./pages.js')]);
-      await pages.ready;
-      html = pages.profilePage(data); title = data.display_name || data.handle;
-    } else throw new Error('This page doesn’t exist. Follow a bounty or maker link to explore.');
-    if (token !== generation) return;
-    main.innerHTML = html;
+
+  async function loadBoard(cursor = null, refresh = false) {
+    try {
+      const response = await fetchBoard(cursor, { refresh });
+      pages.set(cursor || '', response);
+      const unique = new Map();
+      for (const page of pages.values()) for (const item of page.items || []) if (item.slug) unique.set(item.slug, item);
+      board.setItems([...unique.values()]);
+      nextCursor = [...pages.values()].at(-1)?.next_cursor || null;
+      moreBounties.hidden = !nextCursor;
+      text(boardNote, '');
+      return response;
+    } catch (error) {
+      board.fail();
+      patchHTML(boardNote, `<span>Board unavailable. ${escapeHTML(error.message)}</span><button data-action="retry-board">Try again</button>`);
+      throw error;
+    }
+  }
+
+  function fetchPane(destination, refresh = false) {
+    const options = { refresh };
+    if (destination.kind === 'bounty') return fetchBounty(destination.slug, options);
+    if (destination.kind === 'leaderboard') return fetchStandings(destination.slug, destination.view, options);
+    if (destination.kind === 'profile') return fetchMaker(destination.handle, options);
+    return Promise.resolve(null);
+  }
+  function renderPane() {
+    let html, title;
+    if (route.kind === 'welcome') { html = welcomePane(board.items); title = 'Good ideas. Real rewards.'; }
+    if (route.kind === 'bounty') { html = bountyPane(routeData); title = routeData.title; }
+    if (route.kind === 'leaderboard') {
+      const competition = board.items.find(item => item.slug === route.slug) || {};
+      pageStart = Math.min(pageStart, Math.max(0, Math.ceil((routeData.entries?.length || 0) / 50) - 1) * 50);
+      html = leaderboardPane(routeData, route.slug, competition, pageStart);
+      title = 'Leaderboard · ' + (routeData.competition?.title || route.slug);
+    }
+    if (route.kind === 'profile') { html = profilePane(routeData); title = routeData.display_name || routeData.handle; }
+    patchHTML(pane, html);
     document.title = `${title} | make.fun`;
-    mount?.();
-    document.querySelector('.nav-board').setAttribute('aria-current',parts.length ? 'false' : 'page');
-    window.__routeError = null;
-  } catch (error) {
-    if (token !== generation) return;
-    main.innerHTML = failure(error.name === 'TimeoutError' ? 'The request took too long. Check your connection and try again.' : error.message);
-    window.__routeError = error.message;
-    main.querySelector('#retry').addEventListener('click',navigate);
+    pane.dataset.surface = route.kind;
   }
-  if (token !== generation) return;
-  main.setAttribute('aria-busy','false');
-  window.scrollTo(0,0);
-  window.__shotReady = true;
-}
-setInterval(() => {
-  main.querySelectorAll('[data-deadline]').forEach(node => {
-    node.textContent = timeLeft(node.dataset.deadline);
-    node.classList.toggle('urgent',soon(node.dataset.deadline));
-    node.classList.toggle('ended',ended(node.dataset.deadline));
+
+  async function navigate() {
+    const token = ++generation;
+    window.__shotReady = false;
+    window.__routeError = null;
+    app.setAttribute('aria-busy', 'true');
+    detail.setAttribute('aria-busy', 'true');
+    text(paneNote, '');
+    const boardRequest = loadBoard();
+    try {
+      const destination = parseRoute();
+      const changed = destination.key !== route?.key;
+      const viewChanged = destination.view !== route?.view;
+      route = destination;
+      if (changed || viewChanged) pageStart = 0;
+      if (route.slug) board.select(route.slug);
+      else if (route.kind === 'welcome') board.select('');
+      if (changed) { patchHTML(pane, loadingPane()); detail.scrollTop = 0; }
+      const [boardResult, paneResult] = await Promise.allSettled([boardRequest, fetchPane(route)]);
+      if (token !== generation) return;
+      if (paneResult.status === 'rejected') throw paneResult.reason;
+      if (boardResult.status === 'rejected' && route.kind === 'welcome') throw boardResult.reason;
+      routeData = paneResult.value;
+      renderPane();
+      if (boardResult.status === 'rejected') window.__routeError = boardResult.reason.message;
+      if (firstRoute && route.slug) board.reveal(route.slug);
+      firstRoute = false;
+    } catch (error) {
+      await boardRequest.catch(() => {});
+      if (token !== generation) return;
+      if (error instanceof URIError) error = new Error('This link is malformed. Pick a bounty from the board to open a valid view.');
+      route = null;
+      routeData = null;
+      patchHTML(pane, errorPane(error.message));
+      pane.dataset.surface = 'error';
+      window.__routeError = error.message;
+      document.title = 'View unavailable | make.fun';
+    } finally {
+      if (token === generation) {
+        app.setAttribute('aria-busy', 'false');
+        detail.setAttribute('aria-busy', 'false');
+        window.__shotReady = true;
+      }
+    }
+  }
+
+  async function refresh() {
+    if (refreshing || !route) return;
+    refreshing = true;
+    refreshButton.disabled = true;
+    const token = generation;
+    const [boardResult, result] = await Promise.allSettled([loadBoard(null, true), fetchPane(route, true)]);
+    if (token === generation) {
+      if (result.status === 'fulfilled') { routeData = result.value; renderPane(); }
+      text(paneNote, result.status === 'rejected' ? `Keeping the last loaded view. ${result.reason.message}`
+        : boardResult.status === 'rejected' ? 'The board could not refresh. Try again shortly.' : '');
+    }
+    refreshing = false;
+    refreshButton.disabled = false;
+  }
+
+  board.root.querySelector('form').addEventListener('submit', event => event.preventDefault());
+  document.querySelector('#search').addEventListener('input', event => { board.filters.q = event.target.value; board.applyFilters(); });
+  document.querySelector('#state').addEventListener('change', event => { board.filters.state = event.target.value; board.applyFilters(); });
+  board.root.addEventListener('click', event => {
+    const filter = event.target.closest('[data-filter]');
+    if (filter) { board.filters[filter.dataset.filter] = filter.dataset.value; board.applyFilters(); }
   });
-},30_000);
-window.addEventListener('hashchange',navigate);
-navigate();
+  document.body.addEventListener('click', async event => {
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    if (button.dataset.action === 'refresh') refresh();
+    if (button.dataset.action === 'retry') navigate();
+    if (button.dataset.action === 'retry-board') { try { await loadBoard(null, true); } catch { /* Board already shows the error. */ } }
+    if (button.dataset.action === 'clear') { board.reset(); document.querySelector('#search').focus(); }
+    if (['more-rows', 'previous-rows'].includes(button.dataset.action) && route?.kind === 'leaderboard' && routeData) {
+      pageStart = Math.max(0, pageStart + (button.dataset.action === 'more-rows' ? 50 : -50));
+      renderPane();
+      detail.scrollTop = pane.querySelector('.standings').offsetTop - detail.offsetTop - 12;
+    }
+  });
+  moreBounties.addEventListener('click', async () => {
+    moreBounties.disabled = true;
+    try { await loadBoard(nextCursor); } catch { /* Retry stays available in the board. */ }
+    moreBounties.disabled = false;
+  });
+  document.querySelectorAll('.skip').forEach(anchor => anchor.addEventListener('click', event => {
+    event.preventDefault();
+    const target = anchor.classList.contains('skip-board') ? document.querySelector('#search') : detail;
+    target.focus();
+    target.scrollIntoView({ block: 'nearest' });
+  }));
+  app.addEventListener('error', event => {
+    if (event.target.tagName === 'IMG') event.target.remove();
+  }, true);
+  document.querySelector('#search').addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.target.value = ''; board.filters.q = ''; board.applyFilters(); }
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.target.closest('input,textarea,select,[contenteditable]')) {
+      event.preventDefault(); document.querySelector('#search').focus();
+    }
+  });
+  const clock = setInterval(() => app.querySelectorAll('[data-deadline]').forEach(node => {
+    text(node, countdown(node.dataset.deadline));
+    node.classList.toggle('urgent', closingSoon(node.dataset.deadline));
+    node.classList.toggle('ended', hasEnded(node.dataset.deadline));
+  }), 30_000);
+  const updates = setInterval(() => { if (!document.hidden) refresh(); }, 60_000);
+  window.addEventListener('pagehide', () => { clearInterval(clock); clearInterval(updates); }, { once: true });
+  window.addEventListener('hashchange', navigate);
+  await navigate();
+}
+
+start().catch(error => {
+  document.querySelector('#app').className = '';
+  document.querySelector('#app').textContent = error.message;
+  window.__routeError = error.message;
+  window.__shotReady = true;
+});
